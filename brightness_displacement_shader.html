@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Shader de Píxeles Flotantes</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: #111;
+            font-family: 'Courier New', monospace;
+            color: white;
+            overflow: hidden;
+        }
+        #container {
+            width: 100vw;
+            height: 100vh;
+            position: relative;
+        }
+        #controls {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 100;
+            background: rgba(0,0,0,0.8);
+            padding: 20px;
+            border-radius: 10px;
+            border: 1px solid #333;
+        }
+        .control-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            color: #ccc;
+        }
+        input[type="range"] {
+            width: 200px;
+            background: #333;
+        }
+        input[type="file"] {
+            color: white;
+            background: #333;
+            border: 1px solid #555;
+            padding: 5px;
+            border-radius: 3px;
+        }
+        #info {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            background: rgba(0,0,0,0.8);
+            padding: 15px;
+            border-radius: 10px;
+            border: 1px solid #333;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div id="container"></div>
+    
+    <div id="controls">
+        <h3>🎛️ Controles del Shader</h3>
+        
+        <div class="control-group">
+            <label for="imageInput">Cargar Imagen:</label>
+            <input type="file" id="imageInput" accept="image/*">
+        </div>
+        
+        <div class="control-group">
+            <label for="heightScale">Intensidad de Elevación: <span id="heightValue">20</span></label>
+            <input type="range" id="heightScale" min="0" max="50" value="20" step="1">
+        </div>
+        
+        <div class="control-group">
+            <label for="tileSize">Número de Baldosas: <span id="tileSizeValue">32</span></label>
+            <input type="range" id="tileSize" min="8" max="256" value="32" step="8">
+        </div>
+        
+        <div class="control-group">
+            <label for="tileGap">Separación entre Baldosas: <span id="tileGapValue">0.1</span></label>
+            <input type="range" id="tileGap" min="0" max="0.3" value="0.1" step="0.01">
+        </div>
+        
+        <div class="control-group">
+            <label for="tileThickness">Grosor de Lozetas: <span id="tileThicknessValue">2</span></label>
+            <input type="range" id="tileThickness" min="0.5" max="5" value="2" step="0.1">
+        </div>
+        
+        <div class="control-group">
+            <label for="rotationSpeed">Velocidad de Rotación: <span id="rotValue">0.5</span></label>
+            <input type="range" id="rotationSpeed" min="0" max="2" value="0.5" step="0.1">
+        </div>
+    </div>
+    
+    <div id="info">
+        <strong>Shader de Píxeles Flotantes</strong><br>
+        • Cada píxel flota como un cuadrado individual<br>
+        • Solo se ve la cara superior de cada píxel<br>
+        • Mantiene la relación de aspecto de la imagen<br>
+        • Los píxeles brillantes se elevan más<br>
+        • Usa el mouse para rotar la cámara<br>
+        • Rueda del mouse para zoom
+    </div>
+
+    <script>
+        let scene, camera, renderer, mesh;
+        let texture, material;
+        let controls = {};
+        
+        // Vertex Shader - Píxeles flotantes con relación de aspecto
+        const vertexShader = `
+            uniform sampler2D heightMap;
+            uniform float heightScale;
+            uniform float tileSize;
+            uniform float tileGap;
+            uniform float tileThickness;
+            uniform vec2 imageAspect;
+            varying vec2 vUv;
+            varying vec3 vNormal;
+            varying vec3 vPosition;
+            varying float vBrightness;
+            varying vec3 vTileColor;
+            
+            // Función para calcular la luminancia (brillo)
+            float getLuminance(vec3 color) {
+                return dot(color, vec3(0.299, 0.587, 0.114));
+            }
+            
+            void main() {
+                // Ajustar UV para mantener relación de aspecto
+                vec2 aspectUv = uv;
+                
+                // Si la imagen es más ancha que alta
+                if (imageAspect.x > imageAspect.y) {
+                    aspectUv.y = (aspectUv.y - 0.5) * (imageAspect.y / imageAspect.x) + 0.5;
+                }
+                // Si la imagen es más alta que ancha
+                else if (imageAspect.y > imageAspect.x) {
+                    aspectUv.x = (aspectUv.x - 0.5) * (imageAspect.x / imageAspect.y) + 0.5;
+                }
+                
+                vUv = aspectUv;
+                
+                // Verificar si estamos dentro del área de la imagen
+                if (aspectUv.x < 0.0 || aspectUv.x > 1.0 || aspectUv.y < 0.0 || aspectUv.y > 1.0) {
+                    // Fuera de la imagen - hacer invisible
+                    vBrightness = 0.0;
+                    vTileColor = vec3(0.0);
+                    gl_Position = vec4(0.0, 0.0, -1000.0, 1.0); // Enviar muy lejos
+                    return;
+                }
+                
+                // Convertir UV a coordenadas de píxel/lozeta
+                vec2 tileCoord = floor(aspectUv * tileSize) / tileSize;
+                vec2 tileCenter = tileCoord + (1.0 / tileSize) * 0.5;
+                vec2 localTilePos = fract(aspectUv * tileSize);
+                
+                // Obtener el brillo del centro del píxel
+                vec3 tileColor = texture2D(heightMap, tileCenter).rgb;
+                float tileBrightness = getLuminance(tileColor);
+                vBrightness = tileBrightness;
+                vTileColor = tileColor;
+                
+                // Crear píxel flotante - solo la cara superior
+                vec3 newPosition = position;
+                
+                // Tamaño del píxel (más pequeño que el espacio disponible para crear separación)
+                float pixelScale = 1.0 - tileGap * 2.0;
+                
+                // Centrar el píxel en su celda
+                vec2 centeredPos = (localTilePos - 0.5) * pixelScale;
+                
+                // Crear forma cuadrada perfecta para el píxel
+                float pixelHalfSize = pixelScale * 0.45;
+                
+                // Solo renderizar si estamos dentro del área del píxel
+                if (abs(centeredPos.x) > pixelHalfSize || abs(centeredPos.y) > pixelHalfSize) {
+                    // Fuera del píxel - enviar muy lejos para que no se renderice
+                    gl_Position = vec4(0.0, 0.0, -1000.0, 1.0);
+                    return;
+                }
+                
+                // Aplicar la posición del píxel manteniendo relación de aspecto
+                vec2 scaleFactor = vec2(50.0) / max(imageAspect.x, imageAspect.y);
+                newPosition.xy = position.xy * scaleFactor * max(imageAspect.x, imageAspect.y) / 50.0;
+                newPosition.xy += (centeredPos - (localTilePos - 0.5)) * scaleFactor.x / tileSize;
+                
+                // Elevar el píxel según el brillo - solo hacia arriba
+                newPosition.z += tileBrightness * heightScale;
+                
+                // Normal siempre hacia arriba (solo cara superior visible)
+                vNormal = normalMatrix * vec3(0.0, 0.0, 1.0);
+                vPosition = (modelViewMatrix * vec4(newPosition, 1.0)).xyz;
+                
+                gl_Position = projectionMatrix * modelViewMatrix * vec4(newPosition, 1.0);
+            }
+        `;
+        
+        // Fragment Shader - Solo cara superior de píxeles flotantes
+        const fragmentShader = `
+            uniform sampler2D heightMap;
+            uniform vec3 lightPosition;
+            uniform vec3 lightColor;
+            uniform float ambientStrength;
+            uniform float tileSize;
+            uniform float tileGap;
+            varying vec2 vUv;
+            varying vec3 vNormal;
+            varying vec3 vPosition;
+            varying float vBrightness;
+            varying vec3 vTileColor;
+            
+            void main() {
+                // Si el brillo es 0, significa que estamos fuera de la imagen
+                if (vBrightness <= 0.0) {
+                    discard;
+                }
+                
+                // Color base del píxel
+                vec3 baseColor = vTileColor;
+                
+                // Crear un efecto de superficie ligeramente variada
+                vec2 localPos = fract(vUv * tileSize);
+                vec2 centeredPos = (localPos - 0.5) * 2.0; // -1 a 1
+                
+                // Gradiente sutil del centro hacia los bordes
+                float distanceFromCenter = length(centeredPos);
+                float surfaceVariation = 1.0 - distanceFromCenter * 0.1;
+                baseColor *= surfaceVariation;
+                
+                // Añadir un pequeño borde más oscuro para definición
+                float edgeDistance = max(abs(centeredPos.x), abs(centeredPos.y));
+                if (edgeDistance > 0.85) {
+                    baseColor *= 0.8;
+                }
+                
+                // Cálculos de iluminación simplificados (solo cara superior)
+                vec3 norm = normalize(vNormal);
+                vec3 lightDir = normalize(lightPosition - vPosition);
+                
+                // Luz ambiental
+                vec3 ambient = ambientStrength * lightColor;
+                
+                // Luz difusa (principalmente desde arriba)
+                float diff = max(dot(norm, lightDir), 0.0);
+                vec3 diffuse = diff * lightColor;
+                
+                // Luz especular intensa para píxeles brillantes
+                vec3 viewDir = normalize(-vPosition);
+                vec3 reflectDir = reflect(-lightDir, norm);
+                float spec = pow(max(dot(viewDir, reflectDir), 0.0), 16.0);
+                vec3 specular = spec * lightColor * 0.8 * vBrightness;
+                
+                // Combinar iluminación
+                vec3 result = (ambient + diffuse + specular) * baseColor;
+                
+                // Aumentar el contraste para píxeles más definidos
+                result = pow(result, vec3(0.8));
+                
+                gl_FragColor = vec4(result, 1.0);
+            }
+        `;
+        
+        function init() {
+            // Crear escena
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x1a1a1a);
+            
+            // Crear cámara
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 0, 50);
+            
+            // Crear renderer
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            document.getElementById('container').appendChild(renderer.domElement);
+            
+            // Configurar controles PRIMERO
+            setupControls();
+            
+            // Cargar imagen por defecto (crear una imagen de prueba)
+            createDefaultTexture();
+            
+            // Configurar eventos de mouse para rotación
+            setupMouseControls();
+            
+            animate();
+        }
+        
+        function createDefaultTexture() {
+            // Crear una imagen de prueba con gradientes
+            const canvas = document.createElement('canvas');
+            canvas.width = 256;
+            canvas.height = 256;
+            const ctx = canvas.getContext('2d');
+            
+            // Crear un gradiente radial
+            const gradient = ctx.createRadialGradient(128, 128, 0, 128, 128, 128);
+            gradient.addColorStop(0, '#ffffff');
+            gradient.addColorStop(0.3, '#ffaa00');
+            gradient.addColorStop(0.6, '#ff3300');
+            gradient.addColorStop(1, '#000000');
+            
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, 256, 256);
+            
+            // Añadir algunos círculos más pequeños
+            for(let i = 0; i < 5; i++) {
+                const x = Math.random() * 256;
+                const y = Math.random() * 256;
+                const radius = Math.random() * 30 + 10;
+                
+                const smallGradient = ctx.createRadialGradient(x, y, 0, x, y, radius);
+                smallGradient.addColorStop(0, '#ffffff');
+                smallGradient.addColorStop(1, 'transparent');
+                
+                ctx.fillStyle = smallGradient;
+                ctx.fillRect(0, 0, 256, 256);
+            }
+            
+            texture = new THREE.CanvasTexture(canvas);
+            createMesh();
+        }
+        
+        function createMesh() {
+            if (mesh) {
+                scene.remove(mesh);
+                mesh.geometry.dispose();
+                mesh.material.dispose();
+            }
+            
+            // Usar valores por defecto si los controles no están disponibles
+            const resolution = 512;
+            const heightScale = controls.heightScale ? parseFloat(controls.heightScale.value) : 20;
+            const tileSize = controls.tileSize ? parseFloat(controls.tileSize.value) : 32;
+            const tileGap = controls.tileGap ? parseFloat(controls.tileGap.value) : 0.1;
+            const tileThickness = controls.tileThickness ? parseFloat(controls.tileThickness.value) : 2;
+            
+            // Calcular relación de aspecto de la imagen
+            let imageAspect = [1.0, 1.0];
+            if (texture && texture.image) {
+                const imgWidth = texture.image.width || texture.image.videoWidth || 256;
+                const imgHeight = texture.image.height || texture.image.videoHeight || 256;
+                imageAspect = [imgWidth, imgHeight];
+            }
+            
+            // Crear geometría que se adapte a la relación de aspecto
+            const maxDimension = Math.max(imageAspect[0], imageAspect[1]);
+            const width = 50 * (imageAspect[0] / maxDimension);
+            const height = 50 * (imageAspect[1] / maxDimension);
+            
+            const geometry = new THREE.PlaneGeometry(width, height, resolution - 1, resolution - 1);
+            
+            material = new THREE.ShaderMaterial({
+                uniforms: {
+                    heightMap: { value: texture },
+                    heightScale: { value: heightScale },
+                    tileSize: { value: tileSize },
+                    tileGap: { value: tileGap },
+                    tileThickness: { value: tileThickness },
+                    imageAspect: { value: imageAspect },
+                    lightPosition: { value: new THREE.Vector3(10, 10, 30) },
+                    lightColor: { value: new THREE.Vector3(1, 1, 1) },
+                    ambientStrength: { value: 0.5 }
+                },
+                vertexShader: vertexShader,
+                fragmentShader: fragmentShader,
+                side: THREE.FrontSide, // Solo cara frontal ya que son píxeles flotantes
+                transparent: true,
+                alphaTest: 0.1
+            });
+            
+            mesh = new THREE.Mesh(geometry, material);
+            scene.add(mesh);
+        }
+        
+        function setupControls() {
+            controls.heightScale = document.getElementById('heightScale');
+            controls.tileSize = document.getElementById('tileSize');
+            controls.tileGap = document.getElementById('tileGap');
+            controls.tileThickness = document.getElementById('tileThickness');
+            controls.rotationSpeed = document.getElementById('rotationSpeed');
+            controls.imageInput = document.getElementById('imageInput');
+            
+            // Event listeners
+            controls.heightScale.addEventListener('input', (e) => {
+                document.getElementById('heightValue').textContent = e.target.value;
+                if (material) {
+                    material.uniforms.heightScale.value = parseFloat(e.target.value);
+                }
+            });
+            
+            controls.tileSize.addEventListener('input', (e) => {
+                document.getElementById('tileSizeValue').textContent = e.target.value;
+                if (material) {
+                    material.uniforms.tileSize.value = parseFloat(e.target.value);
+                }
+            });
+            
+            controls.tileGap.addEventListener('input', (e) => {
+                document.getElementById('tileGapValue').textContent = e.target.value;
+                if (material) {
+                    material.uniforms.tileGap.value = parseFloat(e.target.value);
+                }
+            });
+            
+            controls.tileThickness.addEventListener('input', (e) => {
+                document.getElementById('tileThicknessValue').textContent = e.target.value;
+                if (material) {
+                    material.uniforms.tileThickness.value = parseFloat(e.target.value);
+                }
+            });
+            
+            controls.rotationSpeed.addEventListener('input', (e) => {
+                document.getElementById('rotValue').textContent = e.target.value;
+            });
+            
+            controls.imageInput.addEventListener('change', (e) => {
+                const file = e.target.files[0];
+                if (file) {
+                    const reader = new FileReader();
+                    reader.onload = (event) => {
+                        const img = new Image();
+                        img.onload = () => {
+                            texture.image = img;
+                            texture.needsUpdate = true;
+                            // Recrear el mesh para actualizar la relación de aspecto
+                            createMesh();
+                        };
+                        img.src = event.target.result;
+                    };
+                    reader.readAsDataURL(file);
+                }
+            });
+        }
+        
+        let mouseX = 0, mouseY = 0;
+        let targetRotationX = 0, targetRotationY = 0;
+        let rotationX = 0, rotationY = 0;
+        
+        function setupMouseControls() {
+            let isMouseDown = false;
+            
+            renderer.domElement.addEventListener('mousedown', () => isMouseDown = true);
+            renderer.domElement.addEventListener('mouseup', () => isMouseDown = false);
+            renderer.domElement.addEventListener('mouseleave', () => isMouseDown = false);
+            
+            renderer.domElement.addEventListener('mousemove', (event) => {
+                if (isMouseDown) {
+                    const deltaX = event.clientX - mouseX;
+                    const deltaY = event.clientY - mouseY;
+                    
+                    targetRotationY += deltaX * 0.01;
+                    targetRotationX += deltaY * 0.01;
+                    
+                    targetRotationX = Math.max(-Math.PI/2, Math.min(Math.PI/2, targetRotationX));
+                }
+                
+                mouseX = event.clientX;
+                mouseY = event.clientY;
+            });
+            
+            // Zoom con la rueda del mouse
+            renderer.domElement.addEventListener('wheel', (event) => {
+                camera.position.z += event.deltaY * 0.1;
+                camera.position.z = Math.max(10, Math.min(100, camera.position.z));
+            });
+        }
+        
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            if (mesh) {
+                // Rotación suave con el mouse
+                rotationX += (targetRotationX - rotationX) * 0.05;
+                rotationY += (targetRotationY - rotationY) * 0.05;
+                
+                mesh.rotation.x = rotationX;
+                mesh.rotation.y = rotationY;
+                
+                // Rotación automática si está habilitada
+                const autoRotSpeed = controls.rotationSpeed ? parseFloat(controls.rotationSpeed.value) : 0.5;
+                if (autoRotSpeed > 0) {
+                    mesh.rotation.y += autoRotSpeed * 0.01;
+                }
+                
+                // Actualizar posición de la luz para que siga la cámara
+                if (material) {
+                    const lightPos = camera.position.clone();
+                    lightPos.add(new THREE.Vector3(10, 10, 10));
+                    material.uniforms.lightPosition.value = lightPos;
+                }
+            }
+            
+            renderer.render(scene, camera);
+        }
+        
+        // Manejar redimensionamiento
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+        
+        // Inicializar
+        init();
+    </script>
+</body>
+</html>
