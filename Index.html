@@ -156,9 +156,9 @@
                 }
                 
                 // Convertir UV a coordenadas de píxel/lozeta
-                vec2 tileCoord = floor(aspectUv * tileSize) / tileSize;
-                vec2 tileCenter = tileCoord + (1.0 / tileSize) * 0.5;
-                vec2 localTilePos = fract(aspectUv * tileSize);
+                vec2 tileCoord = floor(aspectUv * tileSize);
+                vec2 tileCenter = (tileCoord + 0.5) / tileSize;
+                vec2 localTilePos = (aspectUv * tileSize) - tileCoord;
                 
                 // Obtener el brillo del centro del píxel
                 vec3 tileColor = texture2D(heightMap, tileCenter).rgb;
@@ -169,28 +169,30 @@
                 // Crear píxel flotante - solo la cara superior
                 vec3 newPosition = position;
                 
-                // Tamaño del píxel (más pequeño que el espacio disponible para crear separación)
-                float pixelScale = 1.0 - tileGap * 2.0;
+                // Tamaño del píxel ajustado para evitar espacios
+                float pixelScale = (1.0 - tileGap) / tileSize;
                 
-                // Centrar el píxel en su celda
+                // Centrar el píxel en su celda con mayor precisión
                 vec2 centeredPos = (localTilePos - 0.5) * pixelScale;
                 
-                // Crear forma cuadrada perfecta para el píxel
-                float pixelHalfSize = pixelScale * 0.45;
+                // Ajustar el tamaño del píxel para evitar espacios
+                float pixelHalfSize = pixelScale * 0.5;
                 
                 // Solo renderizar si estamos dentro del área del píxel
                 if (abs(centeredPos.x) > pixelHalfSize || abs(centeredPos.y) > pixelHalfSize) {
-                    // Fuera del píxel - enviar muy lejos para que no se renderice
                     gl_Position = vec4(0.0, 0.0, -1000.0, 1.0);
                     return;
                 }
                 
-                // Aplicar la posición del píxel manteniendo relación de aspecto
+                // Aplicar la posición del píxel con mejor escalado
                 vec2 scaleFactor = vec2(50.0) / max(imageAspect.x, imageAspect.y);
-                newPosition.xy = position.xy * scaleFactor * max(imageAspect.x, imageAspect.y) / 50.0;
-                newPosition.xy += (centeredPos - (localTilePos - 0.5)) * scaleFactor.x / tileSize;
+                newPosition.xy = position.xy * scaleFactor;
                 
-                // Elevar el píxel según el brillo - solo hacia arriba
+                // Ajustar la posición para mantener el espaciado uniforme
+                vec2 gridPos = (tileCoord + localTilePos - (tileSize * 0.5)) / tileSize;
+                newPosition.xy += gridPos * scaleFactor.x;
+                
+                // Elevar el píxel según el brillo
                 newPosition.z += tileBrightness * heightScale;
                 
                 // Normal siempre hacia arriba (solo cara superior visible)
